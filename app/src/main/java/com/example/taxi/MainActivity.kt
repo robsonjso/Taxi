@@ -40,18 +40,26 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var rvTripOptions: RecyclerView
     private lateinit var tvDistance: TextView
     private lateinit var tvDuration: TextView
+    private lateinit var placesClient: PlacesClient
     private lateinit var customerId: String
+    private var selectedOrigin: Place? = null
+    private var selectedDestination: Place? = null
 
-    private val places = arrayListOf(
-        Place("Av. Pres. Kenedy, 2385 - Remédios, Osasco - SP, 02675-031", LatLng(-23.532881, -46.792759)),
-        Place("Av. Thomas Edison, 365 - Barra Funda, São Paulo - SP, 01140-000", LatLng(-23.525440, -46.664399)),
-        Place("Av. Brasil, 2033 - Jardim America, São Paulo - SP, 01431-001", LatLng(-23.567982, -46.683396)),
-        Place("Av. Paulista, 1538 - Bela Vista, São Paulo - SP, 01310-200", LatLng(-23.561706, -46.655980))
-    )
+    private val AUTOCOMPLETE_REQUEST_ORIGIN = 1
+    private val AUTOCOMPLETE_REQUEST_DESTINATION = 2
+
+    // Cache de motoristas
+    private val tripOptionsCache = mutableMapOf<String, List<TripOption>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // Inicializa o Google Places
+        if (!Places.isInitialized()) {
+            Places.initialize(applicationContext, getString(R.string.google_maps_key))
+        }
+        placesClient = Places.createClient(this)
 
         // Inicializa componentes
         btnEstimateRide = findViewById(R.id.btn_estimate_ride)
@@ -65,32 +73,87 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
         rvTripOptions.layoutManager = LinearLayoutManager(this)
 
+        setupPlacesAutocomplete()
+
         val mapFragment = supportFragmentManager.findFragmentById(R.id.map_fragment) as SupportMapFragment
         mapFragment.getMapAsync(this)
 
-        // Configura clique no botão
         btnEstimateRide.setOnClickListener {
-            displayDistancesAndDurations()
-            calculateRoute()
+            if (validateInputs()) {
+                displayDistancesAndDurations()
+                calculateRoute()
+            }
         }
+    }
+
+    private fun setupPlacesAutocomplete() {
+        etOriginAddress.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                startPlacesAutocomplete(true)
+            }
+        }
+
+        etDestinationAddress.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                startPlacesAutocomplete(false)
+            }
+        }
+    }
+
+    private fun startPlacesAutocomplete(isOrigin: Boolean) {
+        val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.LAT_LNG, Place.Field.ADDRESS)
+        val intent = Autocomplete.IntentBuilder(AutocompleteActivityMode.OVERLAY, fields)
+            .setCountries(listOf("BR"))
+            .build(this)
+        
+        startActivityForResult(intent, if (isOrigin) AUTOCOMPLETE_REQUEST_ORIGIN else AUTOCOMPLETE_REQUEST_DESTINATION)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            val place = Autocomplete.getPlaceFromIntent(data)
+            
+            when (requestCode) {
+                AUTOCOMPLETE_REQUEST_ORIGIN -> {
+                    selectedOrigin = place
+                    etOriginAddress.setText(place.address)
+                }
+                AUTOCOMPLETE_REQUEST_DESTINATION -> {
+                    selectedDestination = place
+                    etDestinationAddress.setText(place.address)
+                }
+            }
+        }
+    }
+
+    private fun validateInputs(): Boolean {
+        customerId = etCustomerId.text.toString().trim()
+        
+        if (customerId.isEmpty()) {
+            showToast("Por favor, insira o ID do cliente")
+            return false
+        }
+
+        if (selectedOrigin == null) {
+            showToast("Por favor, selecione um endereço de origem válido")
+            return false
+        }
+
+        if (selectedDestination == null) {
+            showToast("Por favor, selecione um endereço de destino válido")
+            return false
+        }
+
+        return true
     }
 
     override fun onMapReady(map: GoogleMap) {
         googleMap = map
-        addMarkers()
         setupMapBounds()
         calculateRoute()
         clearMap()
-    }
-
-    private fun addMarkers() {
-        places.forEach { place ->
-            googleMap.addMarker(
-                MarkerOptions()
-                    .position(place.latLng)
-                    .title(place.name)
-            )
-        }
     }
 
     private fun clearMap() {
@@ -125,54 +188,41 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     private fun setupMapBounds() {
-        val bounds = LatLngBounds.Builder()
-        places.forEach { bounds.include(it.latLng) }
-        googleMap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds.build(), 100))
+        if (selectedOrigin != null && selectedDestination != null) {
+            val bounds = LatLngBounds.Builder()
+            bounds.include(selectedOrigin!!.latLng)
+            bounds.include(selectedDestination!!.latLng)
+            googleMap.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds.build(), 100))
+        }
     }
 
     private fun calculateRoute() {
-        customerId = etCustomerId.text.toString().trim()
-        val originText = etOriginAddress.text.toString().trim()
-        val destinationText = etDestinationAddress.text.toString().trim()
+        if (selectedOrigin != null && selectedDestination != null) {
+            val origin = selectedOrigin!!.latLng
+            val destination = selectedDestination!!.latLng
 
-        if (customerId.isEmpty() || originText.isEmpty() || destinationText.isEmpty()) {
-            showToast("Preencha todos os campos.")
-            return
-        }
+            progressBar.visibility = View.VISIBLE
+            addMarkers(origin, destination) // Adiciona os marcadores
+            drawRoute(origin, destination)  // Desenha a rota
+            estimateRide(customerId, origin, destination) { response ->
+                runOnUiThread { progressBar.visibility = View.GONE }
+                handleEstimateResponse(response)
+            }
 
-        val origin = places.find { it.name == originText }?.latLng
-        val destination = places.find { it.name == destinationText }?.latLng
-
-        if (origin == null || destination == null) {
-            showToast("Endereço não encontrado nos locais pré-definidos.")
-            return
-        }
-
-        progressBar.visibility = View.VISIBLE
-        addMarkers(origin, destination) // Adiciona os marcadores
-        drawRoute(origin, destination)  // Desenha a rota
-        estimateRide(customerId, origin, destination) { response ->
-            runOnUiThread { progressBar.visibility = View.GONE }
-            handleEstimateResponse(response)
-        }
-
-        determineScenarioFromApi(originText, destinationText) { tripOptions ->
-            runOnUiThread {
-                if (tripOptions.isEmpty()) {
-                    showToast("Nenhum motorista disponível.")
-                } else {
-                    val calculatedDistance = if (origin != null) {
-                        calculateDistance(origin, destination)
+            determineScenarioFromApi(etOriginAddress.text.toString().trim(), etDestinationAddress.text.toString().trim()) { tripOptions ->
+                runOnUiThread {
+                    if (tripOptions.isEmpty()) {
+                        showToast("Nenhum motorista disponível.")
                     } else {
-                        0.0 // Valor padrão caso as coordenadas sejam inválidas
-                    }
-                    rvTripOptions.adapter = TripOptionsAdapter(tripOptions) { selectedOption ->
-                        confirmRide(selectedOption, calculatedDistance, originText, destinationText)
-                    }
+                        val calculatedDistance = calculateDistance(origin, destination)
+                        rvTripOptions.adapter = TripOptionsAdapter(tripOptions) { selectedOption ->
+                            confirmRide(selectedOption, calculatedDistance, etOriginAddress.text.toString().trim(), etDestinationAddress.text.toString().trim())
+                        }
 
-                    rvTripOptions.visibility = View.VISIBLE
+                        rvTripOptions.visibility = View.VISIBLE
+                    }
+                    progressBar.visibility = View.GONE
                 }
-                progressBar.visibility = View.GONE
             }
         }
     }
@@ -454,6 +504,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         val apiKey = "AIzaSyD7ODMWrn_tHKFeYmyNAV_1wpnKVpkdL9Q"
         val placeInfoList = mutableListOf<Pair<Place, PlaceInfo>>()
 
+        // Simula a lista de lugares
+        val places = listOf(
+            Place("Av. Pres. Kenedy, 2385 - Remédios, Osasco - SP, 02675-031", LatLng(-23.532881, -46.792759)),
+            Place("Av. Thomas Edison, 365 - Barra Funda, São Paulo - SP, 01140-000", LatLng(-23.525440, -46.664399)),
+            Place("Av. Brasil, 2033 - Jardim America, São Paulo - SP, 01431-001", LatLng(-23.567982, -46.683396)),
+            Place("Av. Paulista, 1538 - Bela Vista, São Paulo - SP, 01310-200", LatLng(-23.561706, -46.655980))
+        )
+
         places.forEach { place ->
             val origin = "${place.latLng.latitude},${place.latLng.longitude}"
 
@@ -526,6 +584,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             return
         }
 
+        // Verifica cache primeiro
+        val cacheKey = "${originText}_${destinationText}"
+        tripOptionsCache[cacheKey]?.let {
+            callback(it)
+            return
+        }
+
         val requestBody = JSONObject().apply {
             put("customer_id", customerId)
             put("origin", originText)
@@ -538,53 +603,82 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             .post(body)
             .build()
 
-        OkHttpClient().newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    showToast("Erro ao conectar-se à API: ${e.message}")
+        // Implementa retry pattern
+        var retryCount = 0
+        val maxRetries = 3
+
+        fun makeRequest() {
+            OkHttpClient().newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (retryCount < maxRetries) {
+                        retryCount++
+                        Log.d("API_RETRY", "Tentativa $retryCount de $maxRetries")
+                        makeRequest()
+                    } else {
+                        runOnUiThread {
+                            showToast("Erro ao conectar-se à API após $maxRetries tentativas")
+                        }
+                    }
                 }
-            }
 
-            override fun onResponse(call: Call, response: Response) {
-                val responseBody = response.body?.string()
-                if (response.isSuccessful && responseBody != null) {
-                    try {
-                        val jsonResponse = JSONObject(responseBody)
-                        val optionsJsonArray = jsonResponse.optJSONArray("options")
-                        val tripOptions = mutableListOf<TripOption>()
+                override fun onResponse(call: Call, response: Response) {
+                    val responseBody = response.body?.string()
+                    if (response.isSuccessful && responseBody != null) {
+                        try {
+                            val jsonResponse = JSONObject(responseBody)
+                            val optionsJsonArray = jsonResponse.optJSONArray("options")
+                            val tripOptions = mutableListOf<TripOption>()
 
-                        if (optionsJsonArray != null) {
-                            for (i in 0 until optionsJsonArray.length()) {
-                                val optionJson = optionsJsonArray.getJSONObject(i)
-                                tripOptions.add(
-                                    TripOption(
-                                        id = optionJson.getInt("id"),
-                                        name = optionJson.getString("name"),
-                                        description = optionJson.getString("description"),
-                                        vehicle = optionJson.getString("vehicle"),
-                                        rating = optionJson.getJSONObject("review").getDouble("rating"),
-                                        comment = optionJson.getJSONObject("review").getString("comment"),
-                                        value = optionJson.getDouble("value")
+                            if (optionsJsonArray != null) {
+                                for (i in 0 until optionsJsonArray.length()) {
+                                    val optionJson = optionsJsonArray.getJSONObject(i)
+                                    tripOptions.add(
+                                        TripOption(
+                                            id = optionJson.getInt("id"),
+                                            name = optionJson.getString("name"),
+                                            description = optionJson.getString("description"),
+                                            vehicle = optionJson.getString("vehicle"),
+                                            rating = optionJson.getJSONObject("review").getDouble("rating"),
+                                            comment = optionJson.getJSONObject("review").getString("comment"),
+                                            value = optionJson.getDouble("value")
+                                        )
                                     )
-                                )
+                                }
+                            }
+
+                            // Salva no cache
+                            tripOptionsCache[cacheKey] = tripOptions
+
+                            runOnUiThread {
+                                callback(tripOptions)
+                            }
+                        } catch (e: Exception) {
+                            if (retryCount < maxRetries) {
+                                retryCount++
+                                Log.d("API_RETRY", "Tentativa $retryCount de $maxRetries")
+                                makeRequest()
+                            } else {
+                                runOnUiThread {
+                                    showToast("Erro ao processar a resposta da API")
+                                }
                             }
                         }
-
-                        runOnUiThread {
-                            callback(tripOptions)
+                    } else {
+                        if (retryCount < maxRetries) {
+                            retryCount++
+                            Log.d("API_RETRY", "Tentativa $retryCount de $maxRetries")
+                            makeRequest()
+                        } else {
+                            runOnUiThread {
+                                showToast("Erro na API: ${response.message}")
+                            }
                         }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            showToast("Erro ao processar a resposta da API.")
-                        }
-                    }
-                } else {
-                    runOnUiThread {
-                        showToast("Erro na API: ${response.message}")
                     }
                 }
-            }
-        })
+            })
+        }
+
+        makeRequest()
     }
 
     data class Place(val name: String, val latLng: LatLng)
@@ -597,5 +691,4 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         val comment: String,
         val value: Double
     )
-
 }
