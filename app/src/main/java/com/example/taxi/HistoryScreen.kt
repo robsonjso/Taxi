@@ -20,6 +20,7 @@ class HistoryScreen : AppCompatActivity() {
     private lateinit var rvTripHistory: RecyclerView
     private lateinit var tripHistoryAdapter: TripHistoryAdapter
     private var drivers: List<String> = listOf("Todos") // Padrão inicial
+    private val tripHistoryCache = mutableMapOf<String, List<Trip>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -71,21 +72,27 @@ class HistoryScreen : AppCompatActivity() {
     }
 
     private fun fetchTripHistory(userId: String, driver: String) {
+        // Verifica cache primeiro
+        val cacheKey = "${userId}_${driver}"
+        tripHistoryCache[cacheKey]?.let { trips ->
+            tripHistoryAdapter.updateTrips(trips)
+            return
+        }
+
         // Define a URL com base no motorista selecionado
-        val url = if (driver == "Todos") {
-                "https://xd5zl5kk2yltomvw5fb37y3bm40vsyrx.lambda-url.sa-east-1.on.aws/ride/$userId"
-            } else {
-                "https://xd5zl5kk2yltomvw5fb37y3bm40vsyrx.lambda-url.sa-east-1.on.aws/ride/$userId?driver_id=$driver"
-            }
+        val url = if (driver.isEmpty()) {
+            "https://xd5zl5kk2yltomvw5fb37y3bm40vsyrx.lambda-url.sa-east-1.on.aws/ride/$userId"
+        } else {
+            "https://xd5zl5kk2yltomvw5fb37y3bm40vsyrx.lambda-url.sa-east-1.on.aws/ride/$userId?driver_name=$driver"
+        }
 
         val request = Request.Builder()
             .url(url)
-            .get() // Define que é uma requisição GET
+            .get()
             .build()
 
         OkHttpClient().newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                // Tratamento para erros de conexão
                 runOnUiThread {
                     Toast.makeText(this@HistoryScreen, "Erro ao conectar com a API: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
@@ -97,28 +104,26 @@ class HistoryScreen : AppCompatActivity() {
 
                 if (response.isSuccessful && responseBody != null) {
                     try {
-                        // Processa as viagens retornadas pela API
                         val trips = parseTrips(responseBody)
+                        
+                        // Salva no cache
+                        tripHistoryCache[cacheKey] = trips
 
                         runOnUiThread {
                             if (trips.isEmpty()) {
-                                // Mensagem caso nenhuma viagem seja encontrada
                                 Toast.makeText(this@HistoryScreen, "Nenhuma viagem encontrada para o filtro.", Toast.LENGTH_SHORT).show()
                             } else {
-                                // Atualiza o RecyclerView com as viagens filtradas
                                 tripHistoryAdapter.updateTrips(trips)
                                 Toast.makeText(this@HistoryScreen, "Viagens carregadas com sucesso!", Toast.LENGTH_SHORT).show()
                             }
                         }
                     } catch (e: Exception) {
-                        // Tratamento para erros ao processar a resposta
                         runOnUiThread {
                             Toast.makeText(this@HistoryScreen, "Erro ao processar os dados da API.", Toast.LENGTH_SHORT).show()
                         }
                         Log.e("FETCH_HISTORY_ERROR", "Erro ao processar os dados: ${e.message}")
                     }
                 } else {
-                    // Tratamento para erros na resposta da API
                     runOnUiThread {
                         Toast.makeText(this@HistoryScreen, "Erro ao buscar histórico: ${response.message}", Toast.LENGTH_SHORT).show()
                     }
